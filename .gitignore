@@ -1,0 +1,13 @@
+# Backend
+RAG_BACKEND/.venv/
+RAG_BACKEND/data/vector_store/
+RAG_BACKEND/Computational_Psychology/
+
+# Frontend
+RAG_FRONTEND/venv_f/
+
+# Python
+**/__pycache__/
+
+# Environment files
+**/.env
