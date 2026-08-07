@@ -1,7 +1,7 @@
 # Backend
 RAG_BACKEND/.venv/
 RAG_BACKEND/data/vector_store/
-RAG_BACKEND/Computational_Psychology/
+RAG_BACKEND/temp_uploads/
 
 # Frontend
 RAG_FRONTEND/venv_f/

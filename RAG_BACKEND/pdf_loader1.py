@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import asynccontextmanager
@@ -8,24 +9,22 @@ from contextlib import asynccontextmanager
 import numpy as np
 import chromadb
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, UploadFile, File
 from pydantic import BaseModel
 from openai import OpenAI
 import uvicorn
 
-from langchain_community.document_loaders import PyPDFLoader,PDFPlumberLoader
+from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
 
-# Folder containing pdf_loader1.py
+# Paths & Directories
 BASE_DIR = Path(__file__).resolve().parent
-
 PDF_DIR = BASE_DIR / "Computational_Psychology"
 VECTOR_DB = BASE_DIR / "data" / "vector_store"
 
-# 1. Document Processing & Splitting
-
+# --- 1. Document Processing & Splitting ---
 
 def process_pdfs(pdf_directory: str):
     pdf_dir = Path(pdf_directory)
@@ -61,9 +60,7 @@ def split_docs(documents, chunk_size=1000, chunk_overlap=200):
     return text_splitter.split_documents(documents)
 
 
-
-# 2. Embeddings & Vector Store
-
+# --- 2. Embeddings & Vector Store ---
 
 class EmbeddingMan:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
@@ -84,6 +81,18 @@ class VectorStore:
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"}
         )
+
+    def clear_database(self):
+        """Deletes the current collection and creates a fresh, empty one."""
+        try:
+            self.client.delete_collection(self.collection_name)
+        except Exception:
+            pass
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
+        print("Vector database cleared.")
 
     def count(self) -> int:
         return self.collection.count()
@@ -110,7 +119,8 @@ class VectorStore:
             documents=documents_text
         )
 
-# 3. RAG Retrieval & Inference
+
+# --- 3. RAG Retrieval & Inference ---
 
 class RAGRetriever:
     def __init__(self, vector_store: VectorStore, embedding_manager: EmbeddingMan):
@@ -140,58 +150,42 @@ class RAGRetriever:
         return retrieved_docs
 
 
-def rag_simple(query: str, retriever: RAGRetriever, client: OpenAI, top_k: int = 3) -> str:
-    results = retriever.retrieve(query, top_k=top_k)
-    context = "\n\n".join([doc['content'] for doc in results]) if results else ""
-
-    if not context:
-        return "No relevant context found in uploaded documents."
-
-    prompt = f"""You are a helpful assistant. Use the following context to answer the question accurately and concisely.
-
-Context:
-{context}
-
-Question: {query}
-Answer:"""
-
-    response = client.chat.completions.create(
-        model="deepseek-ai/DeepSeek-V4-Pro:novita",
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return response.choices[0].message.content
-
-
-def rag_with_sources(query: str, retriever: RAGRetriever, client: OpenAI, top_k: int = 5, chat_history: List[Dict[str,str]]=None) -> Dict[str, Any]:
+def rag_with_sources(
+    query: str, 
+    retriever: RAGRetriever, 
+    client: OpenAI, 
+    top_k: int = 5, 
+    chat_history: Optional[List[Dict[str, str]]] = None
+) -> Dict[str, Any]:
     """Generates an answer and collects detailed source document metadata."""
     results = retriever.retrieve(query, top_k=top_k)
-    if chat_history is None:
-        chat_historry=[]
-
     
+    # ✅ FIX: Fixed typo ('chat_historry' -> 'chat_history')
+    if chat_history is None:
+        chat_history = []
+
     if not results:
         return {
             "answer": "No relevant context found in uploaded documents.",
             "sources": []
         }
-    messages=[
-        {"role":"system", "content": "You are a helpful assistant. Use the following context to answer the question accurately and concisely."}
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant. Use the provided context to answer questions accurately and concisely."}
     ]
+    
     for msg in chat_history:
         messages.append({"role": msg["role"], "content": msg["content"]})
 
     context = "\n\n".join([doc['content'] for doc in results])
 
-    prompt = f"""You are a helpful assistant. Use the following context to answer the question accurately and concisely.
-
-Context:
+    prompt = f"""Context:
 {context}
 
 Question: {query}
 Answer:"""
     
-    messages.append({"role":"user","content": prompt})
+    messages.append({"role": "user", "content": prompt})
 
     response = client.chat.completions.create(
         model="deepseek-ai/DeepSeek-V4-Pro:novita",
@@ -216,9 +210,8 @@ Answer:"""
     }
 
 
-# 4. FastAPI Setup & State Management
+# --- 4. FastAPI Setup & State Management ---
 
-# Global pipeline references
 rag_retriever: RAGRetriever = None
 ai_client: OpenAI = None
 
@@ -241,18 +234,17 @@ def initialize_rag(force_reindex: bool = False):
 
     embedding_manager = EmbeddingMan()
     vectorstore = VectorStore()
-    directory_path =PDF_DIR
 
-    #Only ingest PDFs if collection is empty (or forced)
     if vectorstore.count() == 0 or force_reindex:
-        print("Vector database empty. Ingesting PDFs...")
-        all_docs = process_pdfs(directory_path)
+        print("Vector database empty. Ingesting initial PDFs...")
+        all_docs = process_pdfs(str(PDF_DIR))
         chunks = split_docs(all_docs)
-        texts = [doc.page_content for doc in chunks]
-        embeddings = embedding_manager.create_embeddings(texts)
-        vectorstore.add_documents(chunks, embeddings)
+        if chunks:
+            texts = [doc.page_content for doc in chunks]
+            embeddings = embedding_manager.create_embeddings(texts)
+            vectorstore.add_documents(chunks, embeddings)
     else:
-        print(f"Vector store already loaded with {vectorstore.count()} chunks. Skipping ingestion.")
+        print(f"Vector store already loaded with {vectorstore.count()} chunks. Skipping initial ingestion.")
 
     rag_retriever = RAGRetriever(vectorstore, embedding_manager)
     return rag_retriever, ai_client
@@ -269,12 +261,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG PDF Search API", lifespan=lifespan)
 
+# --- Pydantic Schemas ---
+
 class ChatMessage(BaseModel):
-    role:str
-    content:str
+    role: str
+    content: str
+
 class AskRequest(BaseModel):
     text: str
-    top_k:int
+    top_k: int
     chat_history: List[ChatMessage] = []
 
 class SourceMetadata(BaseModel):
@@ -287,10 +282,10 @@ class SourceMetadata(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     sources: List[SourceMetadata]
-    chat_history:List[ChatMessage]=[]
+    chat_history: List[ChatMessage] = []
 
 
-
+# --- Endpoints ---
 
 @app.get("/health")
 def health_check():
@@ -306,14 +301,64 @@ def ask_text(request: AskRequest):
         raise HTTPException(status_code=400, detail="Query text must not be empty")
 
     try:
-        ##History loading of pyantic model
-
-        hist_dicts=[msg.model_dump() for msg in request.chat_history]
-
-        answer = rag_with_sources(request.text.strip(), rag_retriever, ai_client,request.top_k,hist_dicts)
+        hist_dicts = [msg.model_dump() for msg in request.chat_history]
+        answer = rag_with_sources(request.text.strip(), rag_retriever, ai_client, request.top_k, hist_dicts)
         return AskResponse(**answer)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"RAG execution failed: {exc}") from exc
+
+
+@app.post("/upload")
+async def upload_pdfs(files: List[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    for file in files:
+        if not file.filename.endswith(".pdf"):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"File '{file.filename}' is not a PDF. Only PDFs are allowed."
+            )
+    
+    # 1. Clear database
+    rag_retriever.vector_store.clear_database()
+    
+    # 2. Temporary save & process
+    temp_dir = Path("temp_uploads")
+    temp_dir.mkdir(exist_ok=True)
+    
+    try:
+        saved_filenames = []
+        for file in files:
+            temp_path = temp_dir / file.filename
+            with temp_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            saved_filenames.append(file.filename)
+        
+        # 3. Process, chunk, embed
+        all_docs = process_pdfs(str(temp_dir))
+        chunks = split_docs(all_docs)
+        
+        if chunks:
+            texts = [doc.page_content for doc in chunks]
+            embeddings = rag_retriever.embedding_manager.create_embeddings(texts)
+            rag_retriever.vector_store.add_documents(chunks, embeddings)
+        
+        return {
+            "status": "success", 
+            "message": f"Processed {len(files)} PDF(s) and reset memory.", 
+            "files_processed": saved_filenames,
+            "chunks_loaded": len(chunks) if chunks else 0
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process PDFs: {str(e)}")
+        
+    finally:
+        # 4. Clean up temporary files
+        for temp_file in temp_dir.glob("*"):
+            if temp_file.is_file():
+                temp_file.unlink()
 
 
 if __name__ == "__main__":

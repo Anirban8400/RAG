@@ -8,11 +8,48 @@ API_URL = "http://127.0.0.1:8000"
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="wide")
 st.title("RAG Chatbot 🤖")
 
-# --- Sidebar: Health Check & Settings ---
+# --- Sidebar: File Upload, Health Check & Settings ---
+# --- Sidebar: Document Upload & Settings ---
 with st.sidebar:
+    st.header("📄 Document Upload")
+    
+   
+    uploaded_files = st.file_uploader(
+        "Upload PDF(s) to start a session", 
+        type=["pdf"], 
+        accept_multiple_files=True
+    )
+    
+    if st.button("Process Document(s)", type="primary", use_container_width=True):
+        if uploaded_files:
+            with st.spinner(f"Wiping memory and processing {len(uploaded_files)} PDF(s)..."):
+                # Format payload for multiple files under key 'files'
+                files_payload = [
+                    ("files", (f.name, f.getvalue(), "application/pdf"))
+                    for f in uploaded_files
+                ]
+                
+                try:
+                    res = requests.post(f"{API_URL}/upload", files=files_payload)
+                    
+                    if res.status_code == 200:
+                        data = res.json()
+                        st.success(f"Successfully processed {len(uploaded_files)} file(s)!")
+                        
+                        # WIPE CHAT HISTORY IN FRONTEND
+                        st.session_state.messages = []
+                        st.rerun()  # Instantly refresh UI
+                    else:
+                        st.error(f"Upload failed: {res.json().get('detail', 'Unknown error')}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot connect to FastAPI backend.")
+        else:
+            st.warning("Please select at least one PDF file first.")
+
+    st.divider()
     st.header("⚙️ System Status")
     
-    # Hit the /health endpoint
+    # Hit health endpoint
     try:
         health_res = requests.get(f"{API_URL}/health")
         if health_res.status_code == 200:
